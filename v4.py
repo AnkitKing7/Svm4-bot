@@ -1453,29 +1453,31 @@ class PanelChoiceView(discord.ui.View):
 # ─────────────────────────────────────────────
 # 8. MAIN COMMANDS (unchanged interface)
 # ─────────────────────────────────────────────
-# Replace in your bot.py:
 
-# @bot.command(name='installpanel')
-# @commands.cooldown(1, 30, commands.BucketType.user)
-# async def install_panel(ctx):
-#     if not await maintenance_check(ctx):
-#         return
-#     user_id = str(ctx.author.id)
-#     vps_list = vps_data.get(user_id, [])
-#     if not vps_list:
-#         await ctx.send(embed=create_error_embed("No VPS", "Pehle VPS banao!"))
-#         return
-#     if len(vps_list) == 1:
-#         await start_panel_install(ctx, vps_list[0]['container_name'])
-#     else:
-#         embed = create_info_embed("🛠 Install Panel",
-#             f"You have **{len(vps_list)}** VPS.\nSelect one:")
-#         view = VPSSelectView(ctx, vps_list)
-#         await ctx.send(embed=embed, view=view)
+@bot.command(name='installpanel')
+@commands.cooldown(1, 30, commands.BucketType.user)
+async def install_panel(ctx):
+    if not await maintenance_check(ctx):
+        return
+    
+    user_id = str(ctx.author.id)
+    vps_list = vps_data.get(user_id, [])
+    
+    if not vps_list:
+        await ctx.send(embed=create_error_embed("No VPS", "Pehle VPS banao!"))
+        return
+    
+    if len(vps_list) == 1:
+        await start_panel_install(ctx, vps_list[0]['container_name'])
+    else:
+        embed = create_info_embed("🛠 Install Panel",
+            f"You have **{len(vps_list)}** VPS.\nSelect one:")
+        view = VPSSelectView(ctx, vps_list)
+        await ctx.send(embed=embed, view=view)
 
-# @bot.command(name='panel')
-# async def panel_alias(ctx):
-#     await install_panel(ctx)
+@bot.command(name='panel')
+async def panel_alias(ctx):
+    await install_panel(ctx)
 
 @bot.command(name='list')
 @commands.cooldown(1, 5, commands.BucketType.user)
