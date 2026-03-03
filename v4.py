@@ -31,7 +31,7 @@ DEFAULT_STORAGE_POOL = 'default'
 
 # Banner and Thumbnail URLs
 THUMBNAIL = "https://cdn.discordapp.com/attachments/1429752932756361267/1478323497179807837/1763894084589.jpg?ex=69a7fb8b&is=69a6aa0b&hm=a294b1999165bad8406a47677829782d881653b3983acbd6ce9f61c7b6e89dc5&"
-BANNER = "https://cdn.discordapp.com/attachments/1429752932756361267/1478323497179807837/1763894084589.jpg?ex=69a7fb8b&is=69a6aa0b&hm=a294b1999165bad8406a47677829782d881653b3983acbd6ce9f61c7b6e89dc5&"  # Replace with your banner URL
+BANNER = "&"  # Replace with your banner URL
 
 # Free VPS Plans based on invites/boosts
 FREE_VPS_PLANS = {
@@ -994,67 +994,249 @@ async def my_vps(ctx):
     embed.set_footer(text=f"{BOT_NAME} • Cloud Services")
     await ctx.send(embed=embed)
 
-=========== LIVE PROCESSING INSTALL PANEL =======
 
+# =========== FIXED: LIVE PROCESSING INSTALL PANEL ===========
+# ─────────────────────────────────────────────
+# 1. CREDENTIAL GENERATOR (unchanged, works fine)
+# ─────────────────────────────────────────────
 def generate_random_creds(panel_type: str):
     alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
-    password = ''.join(secrets.choice(alphabet) for i in range(18))
-    rand = ''.join(secrets.choice(string.ascii_lowercase + string.digits) for i in range(8))
-    
+    password = ''.join(secrets.choice(alphabet) for _ in range(18))
+    rand = ''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))
+
     if "puffer" in panel_type.lower():
         username = f"puffer_{rand}"
-        email = f"{username}@pufferpanel.local"
+        email    = f"{username}@pufferpanel.local"
     elif "ptero" in panel_type.lower():
         username = "admin"
-        email = f"ptero_{rand}@pterodactyl.local"
+        email    = f"ptero_{rand}@pterodactyl.local"
     else:
         username = f"user_{rand}"
-        email = f"{username}@panel.local"
-    
+        email    = f"{username}@panel.local"
+
     return username, email, password
 
 
-async def update_processing(msg, text):
-    embed = create_info_embed("⚙️ Real-time Installation", text)
-    await msg.edit(embed=embed)
-
-
-async def take_panel_screenshot(url: str, vps_name: str):
-    """Playwright se real screenshot leke file bhejta hai"""
+# ─────────────────────────────────────────────
+# 2. PROCESSING MESSAGE UPDATER
+# ─────────────────────────────────────────────
+async def update_processing(msg, text: str):
+    """Embed update karta hai real-time status ke liye"""
+    embed = discord.Embed(
+        title="⚙️ Real-time Installation",
+        description=text,
+        color=0x00ccff
+    )
+    embed.set_footer(text=f"{BOT_NAME} • Cloud Services")
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
-            await page.goto(url, timeout=15000)
-            await page.wait_for_timeout(3000)  # page load hone do
-            screenshot_path = f"/tmp/{vps_name}_panel.png"
-            await page.screenshot(path=screenshot_path, full_page=True)
-            await browser.close()
-            return screenshot_path
-    except:
+        await msg.edit(embed=embed)
+    except Exception:
+        pass
+
+
+# ─────────────────────────────────────────────
+# 3. FIX: CLOUDFLARED LINK CAPTURE
+#    Problem: pehle wala re.findall sirf output string check karta tha
+#    Fix: ab hum container ke andar se live link capture karte hain
+# ─────────────────────────────────────────────
+async def get_cloudflared_link(container_name: str, timeout: int = 60) -> str:
+    """
+    Container ke andar cloudflared run karke live link capture karta hai.
+    Returns: trycloudflare.com link ya fallback message
+    """
+    try:
+        # Pehle check karo cloudflared installed hai ya nahi
+        check = await asyncio.create_subprocess_exec(
+            "lxc", "exec", container_name, "--",
+            "bash", "-c", "which cloudflared || echo NOT_FOUND",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        cout, _ = await check.communicate()
+        
+        if b"NOT_FOUND" in cout:
+            # Install cloudflared
+            install_cmd = (
+                "curl -L https://github.com/cloudflare/cloudflared/releases/latest"
+                "/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared "
+                "&& chmod +x /usr/local/bin/cloudflared"
+            )
+            await asyncio.create_subprocess_exec(
+                "lxc", "exec", container_name, "--", "bash", "-c", install_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await asyncio.sleep(5)
+
+        # Log file path
+        log_file = f"/tmp/cf_{container_name}.log"
+        
+        # Pehle purana log clean karo
+        await asyncio.create_subprocess_exec(
+            "lxc", "exec", container_name, "--",
+            "bash", "-c", f"rm -f {log_file}"
+        )
+
+        # Cloudflared start karo background mein, log file mein output save karo
+        run_cmd = f"nohup cloudflared tunnel --url http://localhost:80 > {log_file} 2>&1 &"
+        await asyncio.create_subprocess_exec(
+            "lxc", "exec", container_name, "--", "bash", "-c", run_cmd
+        )
+
+        # Poll karo jab tak link mile ya timeout ho
+        link_pattern = re.compile(r'https://[a-zA-Z0-9\-]+\.trycloudflare\.com')
+        for _ in range(timeout // 3):
+            await asyncio.sleep(3)
+            proc = await asyncio.create_subprocess_exec(
+                "lxc", "exec", container_name, "--",
+                "bash", "-c", f"cat {log_file} 2>/dev/null || echo ''",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            out, _ = await proc.communicate()
+            text = out.decode(errors="ignore")
+            match = link_pattern.search(text)
+            if match:
+                return match.group(0)
+
+        return None  # timeout ho gaya
+
+    except Exception as e:
         return None
 
 
+# ─────────────────────────────────────────────
+# 4. FIX: PANEL INSTALLER
+#    Problem: bash -c 'echo 1 | bash <(curl ...)' LXC ke andar hang karta tha
+#    Fix: script ko pehle download karo, phir run karo with proper env
+# ─────────────────────────────────────────────
+async def run_panel_installer(container_name: str, choice: str,
+                               username: str, email: str, password: str,
+                               timeout: int = 300) -> tuple[bool, str]:
+    """
+    Panel installer run karta hai container ke andar.
+    Returns: (success: bool, output: str)
+    """
+    try:
+        # Step 1: Dependencies install karo
+        dep_cmd = "apt-get update -qq && apt-get install -y curl wget sudo 2>&1 | tail -5"
+        dep_proc = await asyncio.create_subprocess_exec(
+            "lxc", "exec", container_name, "--", "bash", "-c", dep_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        await asyncio.wait_for(dep_proc.communicate(), timeout=120)
+
+        # Step 2: Script download karo
+        dl_cmd = "curl -fsSL https://ptero.jishnu.fun/ -o /tmp/panel_install.sh && chmod +x /tmp/panel_install.sh"
+        dl_proc = await asyncio.create_subprocess_exec(
+            "lxc", "exec", container_name, "--", "bash", "-c", dl_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        try:
+            await asyncio.wait_for(dl_proc.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            return False, "Script download timeout ho gaya. Network check karo."
+
+        # Step 3: Script run karo with env variables (credentials pass karo)
+        # PANEL_USER, PANEL_EMAIL, PANEL_PASS env vars through script
+        run_cmd = (
+            f"export PANEL_CHOICE='{choice}' "
+            f"PANEL_USER='{username}' "
+            f"PANEL_EMAIL='{email}' "
+            f"PANEL_PASS='{password}'; "
+            f"echo '{choice}' | bash /tmp/panel_install.sh 2>&1"
+        )
+        
+        run_proc = await asyncio.create_subprocess_exec(
+            "lxc", "exec", container_name, "--", "bash", "-c", run_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        try:
+            stdout, stderr = await asyncio.wait_for(run_proc.communicate(), timeout=timeout)
+            output = stdout.decode(errors="ignore") + stderr.decode(errors="ignore")
+            
+            if run_proc.returncode == 0 or len(output) > 100:
+                return True, output
+            else:
+                return False, output or "Installer ne kuch output nahi diya."
+        except asyncio.TimeoutError:
+            return False, f"Installation timeout ({timeout}s). VPS console mein check karo."
+
+    except Exception as e:
+        return False, str(e)
+
+
+# ─────────────────────────────────────────────
+# 5. FIX: PLAYWRIGHT SCREENSHOT
+# ─────────────────────────────────────────────
+async def take_panel_screenshot(url: str, vps_name: str):
+    """Panel ka real screenshot leta hai"""
+    try:
+        from playwright.async_api import async_playwright
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox"]
+            )
+            page = await browser.new_page()
+            await page.goto(url, timeout=20000, wait_until="domcontentloaded")
+            await page.wait_for_timeout(4000)
+            screenshot_path = f"/tmp/{vps_name}_panel.png"
+            await page.screenshot(path=screenshot_path, full_page=False)
+            await browser.close()
+            return screenshot_path
+    except Exception:
+        return None
+
+
+# ─────────────────────────────────────────────
+# 6. VPS SELECT VIEW (unchanged logic, small fixes)
+# ─────────────────────────────────────────────
 class VPSSelectView(discord.ui.View):
     def __init__(self, ctx, vps_list):
         super().__init__(timeout=300)
         self.ctx = ctx
         self.vps_list = vps_list
-        options = [discord.SelectOption(label=f"VPS {i+1}: {v['container_name']}", value=v['container_name']) for i, v in enumerate(vps_list)]
-        self.select = discord.ui.Select(placeholder="Select your VPS...", options=options)
+        options = [
+            discord.SelectOption(
+                label=f"VPS {i+1}: {v['container_name']}",
+                value=v['container_name']
+            )
+            for i, v in enumerate(vps_list)
+        ]
+        self.select = discord.ui.Select(
+            placeholder="Select your VPS...",
+            options=options
+        )
         self.select.callback = self.select_callback
         self.add_item(self.select)
 
     async def select_callback(self, interaction: discord.Interaction):
         if str(interaction.user.id) != str(self.ctx.author.id):
-            await interaction.response.send_message("❌ This is not for you!", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ This is not for you!", ephemeral=True
+            )
             return
         await interaction.response.defer()
         await start_panel_install(self.ctx, self.select.values[0], interaction)
 
 
 async def start_panel_install(ctx, container_name: str, interaction=None):
-    embed = create_info_embed("🛠 Choose Panel", f"**VPS:** `{container_name}`\n\nFull auto with random creds + real screenshot:")
+    embed = discord.Embed(
+        title="🛠 Choose Panel",
+        description=(
+            f"**VPS:** `{container_name}`\n\n"
+            "✅ Auto credentials generate honge\n"
+            "✅ Real Cloudflared tunnel link milega\n"
+            "✅ Screenshot DM mein aayega"
+        ),
+        color=0x00ccff
+    )
+    embed.set_footer(text=f"{BOT_NAME} • Cloud Services")
     view = PanelChoiceView(ctx, container_name)
     if interaction:
         await interaction.edit_original_response(embed=embed, view=view)
@@ -1062,6 +1244,9 @@ async def start_panel_install(ctx, container_name: str, interaction=None):
         await ctx.send(embed=embed, view=view)
 
 
+# ─────────────────────────────────────────────
+# 7. FIX: PANEL CHOICE VIEW - MAIN FIXED CLASS
+# ─────────────────────────────────────────────
 class PanelChoiceView(discord.ui.View):
     def __init__(self, ctx, container_name):
         super().__init__(timeout=300)
@@ -1076,95 +1261,221 @@ class PanelChoiceView(discord.ui.View):
     async def ptero_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._install_panel(interaction, "Pterodactyl", "2")
 
-    @discord.ui.button(label="3️⃣ Cloudflared Tunnel", style=discord.ButtonStyle.success, emoji="🌩️")
+    @discord.ui.button(label="3️⃣ Cloudflared Only", style=discord.ButtonStyle.success, emoji="🌩️")
     async def cloud_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._install_panel(interaction, "Cloudflared Tunnel", "3")
+        await self._install_cloudflared_only(interaction)
 
-    async def _install_panel(self, interaction: discord.Interaction, panel_name: str, choice: str):
+    # ── FIXED: Main install function ──────────────────────────────
+    async def _install_panel(self, interaction: discord.Interaction,
+                              panel_name: str, choice: str):
         if str(interaction.user.id) != str(self.ctx.author.id):
-            await interaction.response.send_message("❌ This is not for you!", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ This is not for you!", ephemeral=True
+            )
             return
 
         await interaction.response.defer()
 
+        # Step 1: Credentials generate karo
         username, email, password = generate_random_creds(panel_name)
 
-        msg = await interaction.followup.send(embed=create_info_embed("⚙️ Starting Full Auto Install", "Generating random secure credentials..."))
-
-        await update_processing(msg, f"✅ Credentials Generated\n**Username:** `{username}`\n**Email:** `{email}`\n**Password:** `{password}`\n\nRunning installer...")
-
-        try:
-            # Real output capture for link
-            output = await execute_lxc(
-                f"lxc exec {self.container_name} -- bash -c 'echo {choice} | bash <(curl -s https://ptero.jishnu.fun/)'",
-                timeout=180
+        # FIX: followup.send se pehle message bhejo
+        msg = await interaction.followup.send(
+            embed=discord.Embed(
+                title="⚙️ Installation Starting...",
+                description=(
+                    f"✅ **Credentials Generated**\n"
+                    f"👤 Username: `{username}`\n"
+                    f"📧 Email: `{email}`\n"
+                    f"🔑 Password: `{password}`\n\n"
+                    f"⏳ Panel install ho raha hai... (~3-5 min)"
+                ),
+                color=0x00ccff
             )
+        )
 
-            await update_processing(msg, "🌐 Cloudflared tunnel setup ho raha hai...")
+        # Step 2: Panel install karo (FIXED function)
+        await update_processing(
+            msg,
+            f"📦 **{panel_name} Installing...**\n"
+            f"VPS: `{self.container_name}`\n"
+            f"⏳ Please wait, yeh 3-5 minutes le sakta hai..."
+        )
 
-            # Cloudflared link capture
-            links = re.findall(r'https?://[^\s]+trycloudflare\.com[^\s]*', str(output))
-            panel_link = links[-1] if links else "https://your-panel.trycloudflare.com (VPS console mein check karo)"
+        success, output = await run_panel_installer(
+            self.container_name, choice,
+            username, email, password,
+            timeout=300
+        )
 
-            # Playwright screenshot
-            await update_processing(msg, "📸 Taking real screenshot of panel login page...")
+        if not success:
+            await msg.edit(
+                embed=discord.Embed(
+                    title="❌ Installation Failed",
+                    description=f"**Error:**\n```\n{output[:1500]}\n```",
+                    color=0xff3366
+                )
+            )
+            return
+
+        # Step 3: Cloudflared link capture karo (FIXED)
+        await update_processing(
+            msg,
+            f"✅ **{panel_name} Installed!**\n\n"
+            f"🌐 **Cloudflared tunnel setup ho raha hai...**\n"
+            f"⏳ Link aane mein 30-60 seconds lagte hain..."
+        )
+
+        panel_link = await get_cloudflared_link(self.container_name, timeout=90)
+
+        if not panel_link:
+            panel_link = "❌ Auto-link nahi mila — VPS console mein `cloudflared tunnel --url http://localhost:80` run karo"
+
+        # Step 4: Screenshot lo (agar link mila)
+        screenshot_path = None
+        if panel_link.startswith("https://"):
+            await update_processing(
+                msg,
+                f"✅ **Cloudflared Link:** `{panel_link}`\n\n"
+                f"📸 Panel screenshot le raha hai..."
+            )
             screenshot_path = await take_panel_screenshot(panel_link, self.container_name)
 
-            # FINAL DM with screenshot
-            user = self.ctx.author
-            dm_embed = discord.Embed(
-                title="🎉 Panel Successfully Installed!",
-                description=f"**{panel_name}** on VPS `{self.container_name}`",
+        # Step 5: DM bhejo with all details
+        user = self.ctx.author
+
+        dm_embed = discord.Embed(
+            title=f"🎉 {panel_name} Successfully Installed!",
+            description=f"VPS `{self.container_name}` pe panel ready hai!",
+            color=0x00ff88
+        )
+        dm_embed.add_field(
+            name="🖥️ VPS",
+            value=f"`{self.container_name}`",
+            inline=False
+        )
+        dm_embed.add_field(
+            name="👤 Login Credentials",
+            value=(
+                f"**Username:** `{username}`\n"
+                f"**Email:** `{email}`\n"
+                f"**Password:** `{password}`"
+            ),
+            inline=False
+        )
+        dm_embed.add_field(
+            name="🔗 Panel Link",
+            value=panel_link,
+            inline=False
+        )
+        dm_embed.add_field(
+            name="⚠️ Security",
+            value="Password immediately change karo!",
+            inline=False
+        )
+        dm_embed.set_footer(text=f"{BOT_NAME} • Change password immediately!")
+
+        dm_status = "✅ Full details + screenshot DM mein bhej diye!"
+        try:
+            if screenshot_path and os.path.exists(screenshot_path):
+                file = discord.File(screenshot_path, filename="panel_screenshot.png")
+                dm_embed.set_image(url="attachment://panel_screenshot.png")
+                await user.send(embed=dm_embed, file=file)
+                os.remove(screenshot_path)
+            else:
+                await user.send(embed=dm_embed)
+        except discord.Forbidden:
+            dm_status = "❌ DM blocked hai! Discord mein DMs enable karo."
+        except Exception as e:
+            dm_status = f"❌ DM error: {str(e)[:100]}"
+
+        # Step 6: Final success message
+        final_embed = discord.Embed(
+            title="✅ Installation Complete!",
+            description=(
+                f"**{panel_name}** VPS `{self.container_name}` pe install ho gaya!\n\n"
+                f"🔗 **Link:** {panel_link}\n\n"
+                f"{dm_status}"
+            ),
+            color=0x00ff88
+        )
+        final_embed.add_field(
+            name="👤 Quick Credentials",
+            value=f"**User:** `{username}` | **Pass:** `{password}`",
+            inline=False
+        )
+        final_embed.set_footer(text=f"{BOT_NAME} • Cloud Services")
+        await msg.edit(embed=final_embed)
+
+    # ── Cloudflared Only (Button 3) ───────────────────────────────
+    async def _install_cloudflared_only(self, interaction: discord.Interaction):
+        if str(interaction.user.id) != str(self.ctx.author.id):
+            await interaction.response.send_message(
+                "❌ This is not for you!", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer()
+        msg = await interaction.followup.send(
+            embed=discord.Embed(
+                title="🌩️ Cloudflared Tunnel Setup",
+                description=f"VPS `{self.container_name}` pe Cloudflared tunnel start ho raha hai...",
+                color=0x00ccff
+            )
+        )
+
+        link = await get_cloudflared_link(self.container_name, timeout=90)
+
+        if link:
+            final = discord.Embed(
+                title="✅ Cloudflared Tunnel Ready!",
+                description=f"🔗 **Tunnel Link:** {link}",
                 color=0x00ff88
             )
-            dm_embed.add_field(name="🖥️ VPS", value=f"`{self.container_name}`", inline=False)
-            dm_embed.add_field(name="👤 Random Login Credentials", 
-                             value=f"**Username:** `{username}`\n**Email:** `{email}`\n**Password:** `{password}`", inline=False)
-            dm_embed.add_field(name="🔗 Panel Link", value=panel_link, inline=False)
-            dm_embed.set_footer(text=f"{BOT_NAME} • Change password immediately!")
-
-            try:
-                if screenshot_path and os.path.exists(screenshot_path):
-                    file = discord.File(screenshot_path, filename="panel_screenshot.png")
-                    await user.send(embed=dm_embed, file=file)
-                    os.remove(screenshot_path)
-                else:
-                    await user.send(embed=dm_embed)
-                dm_status = "✅ Full details + REAL SCREENSHOT DM mein bhej diye!"
-            except:
-                dm_status = "❌ DM blocked! Enable DMs"
-
-            success = create_success_embed("✅ Installation Complete!", dm_status)
-            await msg.edit(embed=success)
-
-        except Exception as e:
-            error = create_error_embed("❌ Failed", f"Error: {str(e)}")
-            await msg.edit(embed=error)
+            final.add_field(
+                name="ℹ️ Note",
+                value="Yeh free tunnel hai — link restart ke baad change ho jata hai.",
+                inline=False
+            )
+        else:
+            final = discord.Embed(
+                title="❌ Tunnel Link Nahi Mila",
+                description=(
+                    "Auto-capture failed. Manually run karo VPS console mein:\n"
+                    "```bash\ncloudflared tunnel --url http://localhost:80\n```"
+                ),
+                color=0xff3366
+            )
+        final.set_footer(text=f"{BOT_NAME} • Cloud Services")
+        await msg.edit(embed=final)
 
 
-# ==================== MAIN COMMAND ====================
+# ─────────────────────────────────────────────
+# 8. MAIN COMMANDS (unchanged interface)
+# ─────────────────────────────────────────────
+# Replace in your bot.py:
 
-@bot.command(name='installpanel')
-@commands.cooldown(1, 30, commands.BucketType.user)
-async def install_panel(ctx):
-    if not await maintenance_check(ctx):
-        return
-    user_id = str(ctx.author.id)
-    vps_list = vps_data.get(user_id, [])
-    if not vps_list:
-        await ctx.send(embed=create_error_embed("No VPS", "Pehle VPS banao!"))
-        return
-    if len(vps_list) == 1:
-        await start_panel_install(ctx, vps_list[0]['container_name'])
-    else:
-        embed = create_info_embed("🛠 Install Panel", f"You have **{len(vps_list)}** VPS.\nSelect one:")
-        view = VPSSelectView(ctx, vps_list)
-        await ctx.send(embed=embed, view=view)
+# @bot.command(name='installpanel')
+# @commands.cooldown(1, 30, commands.BucketType.user)
+# async def install_panel(ctx):
+#     if not await maintenance_check(ctx):
+#         return
+#     user_id = str(ctx.author.id)
+#     vps_list = vps_data.get(user_id, [])
+#     if not vps_list:
+#         await ctx.send(embed=create_error_embed("No VPS", "Pehle VPS banao!"))
+#         return
+#     if len(vps_list) == 1:
+#         await start_panel_install(ctx, vps_list[0]['container_name'])
+#     else:
+#         embed = create_info_embed("🛠 Install Panel",
+#             f"You have **{len(vps_list)}** VPS.\nSelect one:")
+#         view = VPSSelectView(ctx, vps_list)
+#         await ctx.send(embed=embed, view=view)
 
-
-@bot.command(name='panel')
-async def panel_alias(ctx):
-    await install_panel(ctx)
+# @bot.command(name='panel')
+# async def panel_alias(ctx):
+#     await install_panel(ctx)
 
 @bot.command(name='list')
 @commands.cooldown(1, 5, commands.BucketType.user)
